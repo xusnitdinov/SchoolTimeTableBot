@@ -12,7 +12,7 @@ if (!BOT_TOKEN) {
 }
 
 const TZ = process.env.TZ || "Asia/Tashkent";
-let SEND_TIME = process.env.SEND_TIME || "18:00";
+let SEND_TIME = process.env.SEND_TIME || "14:00";
 
 const ADMIN_USERNAME = (process.env.ADMIN_USERNAME || "AzizbekEn").replace(/^@/, "");
 
