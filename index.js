@@ -7,73 +7,31 @@ import { open } from "sqlite";
 
 // ===== ENV =====
 const BOT_TOKEN = process.env.BOT_TOKEN;
-
-  // ===== MESSAGE HANDLER (for admin pending actions) =====
-  bot.on("message", async (ctx) => {
-    const from = ctx.from?.username || "";
-    const text = ctx.message?.text || "";
-    if (!from) return;
-
-    // cancel command
-    if (text === "/cancel") {
-      await clearPending(from);
-      return ctx.reply("✅ Bekor qilindi.");
-    }
-
-    const pending = await getPending(from);
-    if (!pending) return; // nothing to handle
-
-    if (pending.action === "broadcast_wait") {
-      // send the provided text to all chats
-      const chats = await listChats();
-      let sent = 0;
-      for (const row of chats) {
-        try {
-          await bot.telegram.sendMessage(row.chat_id, `📣 *Broadcast from admin:*\n\n${text}`, { parse_mode: "Markdown", reply_markup: { inline_keyboard: [] } });
-          sent++;
-        } catch (_) {}
-      }
-      await clearPending(from);
-      return ctx.reply(`✅ Broadcast yuborildi: ${sent} ta chatga.`);
-    }
-
-    if (pending.action === "set_time_wait") {
-      // validate HH:MM
-      const m = text.match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
-      if (!m) return ctx.reply("❌ Noto'g'ri format. Iltimos HH:MM formatida yuboring (masalan 08:30) yoki /cancel bilan chiqish.");
-      const time = `${m[1].padStart(2, "0")}:${m[2]}`;
-      SEND_TIME = time;
-      scheduleDaily();
-      await setSetting("SEND_TIME", SEND_TIME);
-      await clearPending(from);
-      return ctx.reply(`✅ Jo'natish vaqti yangilandi: ${SEND_TIME}`);
-    }
-  });
 if (!BOT_TOKEN) {
   console.error("Missing BOT_TOKEN");
   process.exit(1);
 }
 
 const TZ = process.env.TZ || "Asia/Tashkent";
-let SEND_TIME = process.env.SEND_TIME || "18:00"; // HH:MM
+let SEND_TIME = process.env.SEND_TIME || "18:00";
 const ADMIN_USERNAME = (process.env.ADMIN_USERNAME || "AzizbekEn").replace(/^@/, "");
 
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 const WEBHOOK_PATH = `/telegraf/${WEBHOOK_SECRET}`;
 const PORT = process.env.PORT || 3000;
-const BASE_URL = process.env.BASE_URL || ""; // set in Choreo after you get public URL
+const BASE_URL = process.env.BASE_URL || "";
 
 // ===== BOT =====
 const bot = new Telegraf(BOT_TOKEN);
 
 // ===== TIMETABLE =====
 const TIMETABLE = {
-  1: ["Sinf soati", "Ingliz tili", "Adabiyot", "Algebra", "Informatika", "Geografiya"], // Mon
-  2: ["Fizika", "Ona tili", "O'zb tarix", "Ingliz tili", "Geometriya", "Jismoniy tarbiya"], // Tue
-  3: ["Kimyo", "Informatika", "Geografiya", "Algebra", "Fizika", "Rus tili"], // Wed
-  4: ["Adabiyot", "O'zb tarix", "Biologiya", "Texnologiya", "Geometriya", "Ingliz tili"], // Thu
-  5: ["Ingliz tili", "Jahon tarixi", "Algebra", "Rus tili", "Fizika", "Tarbiya"], // Fri
-  6: ["Kimyo", "Biologiya", "Algebra", "San'at", "Geometriya", "Ona tili"], // Sat
+  1: ["Sinf soati", "Ingliz tili", "Adabiyot", "Algebra", "Informatika", "Geografiya"],
+  2: ["Fizika", "Ona tili", "O'zb tarix", "Ingliz tili", "Geometriya", "Jismoniy tarbiya"],
+  3: ["Kimyo", "Informatika", "Geografiya", "Algebra", "Fizika", "Rus tili"],
+  4: ["Adabiyot", "O'zb tarix", "Biologiya", "Texnologiya", "Geometriya", "Ingliz tili"],
+  5: ["Ingliz tili", "Jahon tarixi", "Algebra", "Rus tili", "Fizika", "Tarbiya"],
+  6: ["Kimyo", "Biologiya", "Algebra", "San'art", "Geometriya", "Ona tili"],
 };
 
 const DAY_NAMES = ["Yakshanba", "Dushanba", "Seshanba", "Chorshanba", "Payshanba", "Juma", "Shanba"];
@@ -85,9 +43,9 @@ function formatSubjects(dayIndex, subjects) {
 }
 
 function getTomorrowIndex(now = new Date()) {
-  const today = now.getDay(); // 0..6
-  if (today === 6) return 1; // Sat -> Mon (skip Sun)
-  if (today === 0) return 1; // Sun -> Mon
+  const today = now.getDay();
+  if (today === 6) return 1;
+  if (today === 0) return 1;
   return today + 1;
 }
 
@@ -95,7 +53,7 @@ function getTodayIndex(now = new Date()) {
   return now.getDay();
 }
 
-// ===== KEYBOARDS (GREY BUTTONS) =====
+// ===== KEYBOARDS =====
 function mainMenuKeyboard() {
   return {
     inline_keyboard: [
@@ -105,9 +63,28 @@ function mainMenuKeyboard() {
       ],
       [
         { text: "📅 To'liq jadval", callback_data: "cmd_full" },
+        { text: "⚙️ Sozlamalar", callback_data: "cmd_settings" },
+      ],
+      [
+        { text: "📊 Statistika", callback_data: "cmd_stats" },
         { text: "🛑 Stop", callback_data: "cmd_stop" },
       ],
       [{ text: "ℹ️ Yordam", callback_data: "cmd_help" }],
+    ],
+  };
+}
+
+function settingsKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "🔔 Reminder On/Off", callback_data: "settings_toggle_reminder" },
+        { text: "🌍 Til: O'zbek", callback_data: "settings_lang_uz" },
+      ],
+      [
+        { text: "🕒 Reminder vaqti", callback_data: "settings_reminder_time" },
+        { text: "🔙 Orqaga", callback_data: "cmd_back" },
+      ],
     ],
   };
 }
@@ -116,12 +93,16 @@ function adminKeyboard() {
   return {
     inline_keyboard: [
       [
-        { text: "📢 Broadcast (ertaga)", callback_data: "admin_broadcast" },
-        { text: "📋 Chatlar ro'yxati", callback_data: "admin_list" },
+        { text: "📊 Boshqaruv paneli", callback_data: "admin_dashboard" },
+        { text: "📢 Broadcast", callback_data: "admin_broadcast" },
       ],
       [
-        { text: "🕒 Vaqtni o'zgartirish", callback_data: "admin_set_time" },
-        { text: "🔙 Menu", callback_data: "admin_back" },
+        { text: "📋 Chatlar", callback_data: "admin_list" },
+        { text: "🕒 Jo'natish vaqti", callback_data: "admin_set_time" },
+      ],
+      [
+        { text: "📈 Statistika", callback_data: "admin_stats" },
+        { text: "🔙 Orqaga", callback_data: "admin_back" },
       ],
     ],
   };
@@ -134,6 +115,10 @@ function adminTimeKeyboard() {
         { text: "08:00", callback_data: "admin_time_08:00" },
         { text: "12:00", callback_data: "admin_time_12:00" },
         { text: "18:00", callback_data: "admin_time_18:00" },
+      ],
+      [
+        { text: "20:00", callback_data: "admin_time_20:00" },
+        { text: "Custom", callback_data: "admin_time_custom" },
       ],
       [{ text: "🔙 Orqaga", callback_data: "admin_back" }],
     ],
@@ -149,11 +134,17 @@ async function main() {
     CREATE TABLE IF NOT EXISTS chats (
       chat_id INTEGER PRIMARY KEY,
       last_message_id INTEGER DEFAULT NULL,
-      last_start_ts INTEGER DEFAULT 0
+      last_start_ts INTEGER DEFAULT 0,
+      reminder_enabled INTEGER DEFAULT 1,
+      reminder_time TEXT DEFAULT '18:00',
+      language TEXT DEFAULT 'uz',
+      first_name TEXT,
+      username TEXT,
+      created_at INTEGER DEFAULT (strftime('%s','now')),
+      last_interaction_ts INTEGER DEFAULT 0
     );
   `);
 
-  // settings table for persistent values (like SEND_TIME)
   await db.exec(`
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -161,7 +152,6 @@ async function main() {
     );
   `);
 
-  // pending admin actions (one per admin username)
   await db.exec(`
     CREATE TABLE IF NOT EXISTS pending_actions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -172,38 +162,24 @@ async function main() {
     );
   `);
 
-  // Helper to get/set settings
-  async function getSetting(key) {
-    const row = await db.get(`SELECT value FROM settings WHERE key = ?`, key);
-    return row?.value ?? null;
-  }
-  async function setSetting(key, value) {
-    await db.run(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, String(value));
-  }
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS stats (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_type TEXT,
+      chat_id INTEGER,
+      data TEXT,
+      created_at INTEGER DEFAULT (strftime('%s','now'))
+    );
+  `);
 
-  // Helper for pending actions
-  async function setPending(adminUsername, action, payload = null) {
-    await db.run(`DELETE FROM pending_actions WHERE admin_username = ?`, adminUsername);
-    await db.run(`INSERT INTO pending_actions(admin_username, action, payload) VALUES(?,?,?)`, adminUsername, action, payload);
-  }
-  async function getPending(adminUsername) {
-    return db.get(`SELECT * FROM pending_actions WHERE admin_username = ? ORDER BY created_at DESC LIMIT 1`, adminUsername);
-  }
-  async function clearPending(adminUsername) {
-    await db.run(`DELETE FROM pending_actions WHERE admin_username = ?`, adminUsername);
-  }
-
-  // load SEND_TIME from settings if present (persisted by admin)
-  const savedSend = await getSetting("SEND_TIME");
-  if (savedSend) {
-    SEND_TIME = savedSend;
-  }
-
-  async function upsertChat(chatId) {
+  // Helper functions
+  async function upsertChat(chatId, firstName = "", username = "") {
     await db.run(
-      `INSERT INTO chats(chat_id) VALUES (?)
-       ON CONFLICT(chat_id) DO NOTHING`,
-      chatId
+      `INSERT INTO chats(chat_id, first_name, username) VALUES (?,?,?)
+       ON CONFLICT(chat_id) DO UPDATE SET first_name=excluded.first_name, username=excluded.username`,
+      chatId,
+      firstName,
+      username
     );
   }
 
@@ -229,8 +205,66 @@ async function main() {
     return row?.last_start_ts ?? 0;
   }
 
+  async function setLastInteraction(chatId) {
+    await db.run(`UPDATE chats SET last_interaction_ts = ? WHERE chat_id = ?`, Math.floor(Date.now() / 1000), chatId);
+  }
+
   async function listChats() {
     return db.all(`SELECT chat_id FROM chats`);
+  }
+
+  async function getSetting(key) {
+    const row = await db.get(`SELECT value FROM settings WHERE key = ?`, key);
+    return row?.value ?? null;
+  }
+
+  async function setSetting(key, value) {
+    await db.run(
+      `INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+      key,
+      String(value)
+    );
+  }
+
+  async function setPending(adminUsername, action, payload = null) {
+    await db.run(`DELETE FROM pending_actions WHERE admin_username = ?`, adminUsername);
+    await db.run(
+      `INSERT INTO pending_actions(admin_username, action, payload) VALUES(?,?,?)`,
+      adminUsername,
+      action,
+      payload
+    );
+  }
+
+  async function getPending(adminUsername) {
+    return db.get(
+      `SELECT * FROM pending_actions WHERE admin_username = ? ORDER BY created_at DESC LIMIT 1`,
+      adminUsername
+    );
+  }
+
+  async function clearPending(adminUsername) {
+    await db.run(`DELETE FROM pending_actions WHERE admin_username = ?`, adminUsername);
+  }
+
+  async function logStat(eventType, chatId, data = "") {
+    await db.run(`INSERT INTO stats(event_type, chat_id, data) VALUES(?,?,?)`, eventType, chatId, data);
+  }
+
+  async function getStats() {
+    const totalUsers = await db.get(`SELECT COUNT(*) as count FROM chats`);
+    const totalInteractions = await db.get(`SELECT COUNT(*) as count FROM stats WHERE event_type='interaction'`);
+    const activeToday = await db.get(
+      `SELECT COUNT(*) as count FROM chats WHERE last_interaction_ts > ?`,
+      Math.floor(Date.now() / 1000) - 86400
+    );
+    return { totalUsers: totalUsers?.count || 0, totalInteractions: totalInteractions?.count || 0, activeToday: activeToday?.count || 0 };
+  }
+
+  // Load SEND_TIME from settings
+  const savedSend = await getSetting("SEND_TIME");
+  if (savedSend) {
+    SEND_TIME = savedSend;
   }
 
   // ---- SEND FUNCTIONS ----
@@ -240,7 +274,6 @@ async function main() {
     const subjects = TIMETABLE[dayIndex];
     if (!subjects) return;
 
-    // delete previous timetable message
     const lastId = await getLastMessage(chatId);
     if (lastId) {
       try {
@@ -256,6 +289,7 @@ async function main() {
     });
 
     await setLastMessage(chatId, sent.message_id);
+    await logStat("interaction", chatId, "view_schedule");
   }
 
   async function sendFullTimetable(chatId) {
@@ -270,9 +304,10 @@ async function main() {
       parse_mode: "Markdown",
       reply_markup: mainMenuKeyboard(),
     });
+    await logStat("interaction", chatId, "view_full_timetable");
   }
 
-  // ---- CRON (optional) ----
+  // ---- CRON ----
   let cronTask = null;
   function scheduleDaily() {
     if (cronTask) {
@@ -283,7 +318,7 @@ async function main() {
 
     const [hh, mm] = SEND_TIME.split(":").map((x) => parseInt(x, 10));
     if (Number.isNaN(hh) || Number.isNaN(mm)) {
-      console.error("SEND_TIME must be HH:MM, like 18:00");
+      console.error("SEND_TIME must be HH:MM");
       process.exit(1);
     }
 
@@ -306,21 +341,23 @@ async function main() {
   // ===== COMMANDS =====
   bot.start(async (ctx) => {
     const chatId = ctx.chat.id;
+    const firstName = ctx.from?.first_name || "";
+    const username = ctx.from?.username || "";
 
-    // rate limit start
     const now = Math.floor(Date.now() / 1000);
     const lastTs = await getLastStartTs(chatId);
     if (now - lastTs < 10) {
       return ctx.reply("Biroz kuting 🙂");
     }
 
-    await upsertChat(chatId);
+    await upsertChat(chatId, firstName, username);
     await setLastStartTs(chatId, now);
+    await setLastInteraction(chatId);
+    await logStat("start", chatId, "");
 
-    return ctx.reply(
-      `✅ Bot tayyor.\nQuyidagi tugmalarni bosing 👇`,
-      { reply_markup: mainMenuKeyboard() }
-    );
+    return ctx.reply(`✅ Bot tayyor.\n👋 Salom ${firstName || "do'st"}!\n\nQuyidagi tugmalarni bosing 👇`, {
+      reply_markup: mainMenuKeyboard(),
+    });
   });
 
   bot.command("admin", async (ctx) => {
@@ -335,43 +372,62 @@ async function main() {
     const data = ctx.callbackQuery?.data || "";
     const chatId = ctx.chat.id;
     const from = ctx.from?.username || "";
+    const firstName = ctx.from?.first_name || "do'st";
 
-    // always answer to remove Telegram loading spinner
     try {
       await ctx.answerCbQuery();
     } catch (_) {}
 
+    await setLastInteraction(chatId);
+
     // ---- USER MENU ----
     if (data === "cmd_today") {
-      await upsertChat(chatId);
+      await upsertChat(chatId, firstName);
       const dayIndex = getTodayIndex(new Date());
-      if (dayIndex === 0) return ctx.reply("😴 Yakshanba — dars yo'q.", { reply_markup: mainMenuKeyboard() });
-      const name = ctx.from?.first_name || ctx.from?.username || "do'st";
-      await ctx.reply(`Salom ${name}!\n😴 Yakshanba — dars yo'q.`);
+      if (dayIndex === 0) {
+        return ctx.reply("😴 Yakshanba — dars yo'q.", { reply_markup: mainMenuKeyboard() });
+      }
+      await ctx.reply(`Salom ${firstName}! 📌 Bugungi darslar:`);
       await sendSchedule(chatId, dayIndex);
       return;
     }
 
     if (data === "cmd_tomorrow") {
-      await upsertChat(chatId);
+      await upsertChat(chatId, firstName);
       const dayIndex = getTomorrowIndex(new Date());
-      const name = ctx.from?.first_name || ctx.from?.username || "do'st";
-      await ctx.reply(`Salom ${name}! Bu ertangi darslar:`);
+      await ctx.reply(`Salom ${firstName}! ➡️ Ertangi darslar:`);
       await sendSchedule(chatId, dayIndex);
       return;
     }
 
     if (data === "cmd_full") {
-      await upsertChat(chatId);
-      const name = ctx.from?.first_name || ctx.from?.username || "do'st";
-      await ctx.reply(`Salom ${name}! To'liq jadval:`);
+      await upsertChat(chatId, firstName);
+      await ctx.reply(`Salom ${firstName}! 📅 To'liq jadval:`);
       await sendFullTimetable(chatId);
+      return;
+    }
+
+    if (data === "cmd_settings") {
+      await ctx.reply("⚙️ Sozlamalar:", { reply_markup: settingsKeyboard() });
+      return;
+    }
+
+    if (data === "cmd_stats") {
+      const stats = await getStats();
+      await ctx.reply(
+        `📊 *Bot Statistikasi*\n\n` +
+          `👥 Foydalanuvchilar: ${stats.totalUsers}\n` +
+          `💬 Jami o'zaro muloqot: ${stats.totalInteractions}\n` +
+          `🔥 Bugun faol: ${stats.activeToday}`,
+        { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() }
+      );
       return;
     }
 
     if (data === "cmd_stop") {
       await removeChat(chatId);
-      await ctx.reply("🛑 Obuna bekor qilindi.\nQayta yoqish uchun /start.", { reply_markup: mainMenuKeyboard() });
+      await logStat("stop", chatId, "");
+      await ctx.reply("🛑 Obuna bekor qilindi.\nQayta yoqish uchun /start.", { reply_markup: { inline_keyboard: [] } });
       return;
     }
 
@@ -381,9 +437,40 @@ async function main() {
           `• "Bugun" — bugungi darslar\n` +
           `• "Ertaga" — ertangi darslar\n` +
           `• "To'liq jadval" — hafta jadvali\n` +
+          `• "Sozlamalar" — reminder va tili\n` +
+          `• "Statistika" — bot statistikasi\n` +
           `• "Stop" — obunani bekor qilish\n\n` +
           `Admin: /admin`,
         { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() }
+      );
+      return;
+    }
+
+    if (data === "cmd_back") {
+      await ctx.reply("🔙 Asosiy menyu:", { reply_markup: mainMenuKeyboard() });
+      return;
+    }
+
+    // ---- SETTINGS ----
+    if (data === "settings_toggle_reminder") {
+      const chat = await db.get(`SELECT reminder_enabled FROM chats WHERE chat_id = ?`, chatId);
+      const newVal = chat?.reminder_enabled ? 0 : 1;
+      await db.run(`UPDATE chats SET reminder_enabled = ? WHERE chat_id = ?`, newVal, chatId);
+      const status = newVal ? "✅ Yoqilgan" : "🔇 O'chirilgan";
+      await ctx.reply(`🔔 Reminder: ${status}`, { reply_markup: settingsKeyboard() });
+      return;
+    }
+
+    if (data === "settings_lang_uz") {
+      await db.run(`UPDATE chats SET language = ? WHERE chat_id = ?`, "uz", chatId);
+      await ctx.reply(`🌍 Til: O'zbek tanlandi`, { reply_markup: settingsKeyboard() });
+      return;
+    }
+
+    if (data === "settings_reminder_time") {
+      await setPending(from || String(chatId), "user_reminder_time_wait");
+      await ctx.reply(
+        `🕒 Reminder vaqtini shu formatda yuboring: HH:MM\nMasalan: 07:00\n\n/cancel bilan bekor qiling.`
       );
       return;
     }
@@ -398,8 +485,22 @@ async function main() {
         return ctx.reply("⚙️ Admin panel:", { reply_markup: adminKeyboard() });
       }
 
+      if (data === "admin_dashboard") {
+        const stats = await getStats();
+        const chats = await listChats();
+        await ctx.reply(
+          `📊 *Admin Boshqaruv Paneli*\n\n` +
+            `👥 Jami foydalanuvchilar: ${chats.length}\n` +
+            `💬 Jami muloqot: ${stats.totalInteractions}\n` +
+            `🔥 Bugun faol: ${stats.activeToday}\n` +
+            `🕒 Jo'natish vaqti: ${SEND_TIME}\n\n` +
+            `Boshqa amallarga admin panelini ishlating.`,
+          { parse_mode: "Markdown", reply_markup: adminKeyboard() }
+        );
+        return;
+      }
+
       if (data === "admin_list") {
-        // show paginated list (10 per page) with remove buttons
         const chats = await listChats();
         const pageSize = 10;
         const page = 0;
@@ -411,26 +512,51 @@ async function main() {
         const rows = pageItems.map((c) => [{ text: `❌ ${c.chat_id}`, callback_data: `admin_remove_${c.chat_id}` }]);
         rows.push([{ text: "🔙 Orqaga", callback_data: "admin_back" }]);
         await ctx.answerCbQuery();
-        return ctx.editMessageText(`🔎 Chatlar: ${chats.length} ta\n\n${lines}`, { reply_markup: { inline_keyboard: rows } });
+        await ctx.editMessageText(`🔎 Chatlar: ${chats.length} ta\n\n${lines}`, {
+          reply_markup: { inline_keyboard: rows },
+        });
+        return;
       }
 
       if (data === "admin_broadcast") {
-        // ask admin to send the message text in this chat
         await setPending(from, "broadcast_wait");
-        return ctx.reply("📣 Iltimos, yuboriladigan xabar matnini shu chatga yuboring. /cancel bilan bekor qiling.");
+        return ctx.reply(
+          "📣 Iltimos, yuboriladigan xabar matnini shu chatga yuboring.\n\n/cancel bilan bekor qiling."
+        );
       }
 
       if (data === "admin_set_time") {
         await setPending(from, "set_time_wait");
-        return ctx.reply("🕒 Iltimos, jo'natish vaqtini HH:MM formatida yuboring (masalan 08:30), yoki pastdagi tez tanlovlardan birini bosing:", { reply_markup: adminTimeKeyboard() });
+        return ctx.reply("🕒 Vaqtni tanlang yoki HH:MM formatida yuboring:", {
+          reply_markup: adminTimeKeyboard(),
+        });
       }
 
-      if (data.startsWith("admin_time_")) {
+      if (data === "admin_stats") {
+        const stats = await getStats();
+        const chats = await listChats();
+        await ctx.reply(
+          `📈 *Chuqur Statistika*\n\n` +
+            `👥 Foydalanuvchilar: ${chats.length}\n` +
+            `💬 Jami muloqot: ${stats.totalInteractions}\n` +
+            `🔥 Bugun faol: ${stats.activeToday}\n` +
+            `🕐 Hozirgi jo'natish vaqti: ${SEND_TIME}`,
+          { parse_mode: "Markdown", reply_markup: adminKeyboard() }
+        );
+        return;
+      }
+
+      if (data && data.startsWith("admin_time_")) {
         const time = data.replace("admin_time_", "");
-        SEND_TIME = time;
-        scheduleDaily();
-        await setSetting("SEND_TIME", SEND_TIME);
-        return ctx.reply(`✅ Jo'natish vaqti yangilandi: ${SEND_TIME}`);
+        if (time !== "custom") {
+          SEND_TIME = time;
+          scheduleDaily();
+          await setSetting("SEND_TIME", SEND_TIME);
+          return ctx.reply(`✅ Jo'natish vaqti yangilandi: ${SEND_TIME}`);
+        } else {
+          await setPending(from, "set_time_wait");
+          return ctx.reply("🕒 Iltimos, HH:MM formatida vaqt yuboring (masalan 08:30):");
+        }
       }
 
       if (data && data.startsWith("admin_remove_")) {
@@ -445,16 +571,72 @@ async function main() {
     }
   });
 
+  // ===== MESSAGE HANDLER =====
+  bot.on("message", async (ctx) => {
+    const from = ctx.from?.username || "";
+    const text = ctx.message?.text || "";
+    const chatId = ctx.chat.id;
+
+    await setLastInteraction(chatId);
+
+    if (text === "/cancel") {
+      await clearPending(from || String(chatId));
+      return ctx.reply("✅ Bekor qilindi.");
+    }
+
+    // User reminder time
+    if (text && text.includes(":")) {
+      const m = text.match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+      if (m) {
+        const pending = await getPending(String(chatId));
+        if (pending?.action === "user_reminder_time_wait") {
+          const time = `${m[1].padStart(2, "0")}:${m[2]}`;
+          await db.run(`UPDATE chats SET reminder_time = ? WHERE chat_id = ?`, time, chatId);
+          await clearPending(String(chatId));
+          return ctx.reply(`✅ Reminder vaqti o'rnatildi: ${time}`, { reply_markup: settingsKeyboard() });
+        }
+      }
+    }
+
+    const pending = await getPending(from);
+    if (!pending) return;
+
+    if (pending.action === "broadcast_wait") {
+      const chats = await listChats();
+      let sent = 0;
+      for (const row of chats) {
+        try {
+          await bot.telegram.sendMessage(row.chat_id, `📣 *Admin Broadcast*\n\n${text}`, {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: [] },
+          });
+          sent++;
+        } catch (_) {}
+      }
+      await clearPending(from);
+      return ctx.reply(`✅ Broadcast yuborildi: ${sent} ta chatga.`);
+    }
+
+    if (pending.action === "set_time_wait") {
+      const m = text.match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+      if (!m) return ctx.reply("❌ Noto'g'ri format. HH:MM formatida yuboring (masalan 08:30) yoki /cancel.");
+      const time = `${m[1].padStart(2, "0")}:${m[2]}`;
+      SEND_TIME = time;
+      scheduleDaily();
+      await setSetting("SEND_TIME", SEND_TIME);
+      await clearPending(from);
+      return ctx.reply(`✅ Jo'natish vaqti yangilandi: ${SEND_TIME}`);
+    }
+  });
+
   bot.catch((err) => console.error("Bot error:", err));
 
-  // ===== WEBHOOK SERVER (Choreo friendly) =====
+  // ===== WEBHOOK SERVER =====
   const app = express();
   app.use(express.json());
 
   app.get("/", (req, res) => res.status(200).send("OK ✅ Bot is alive"));
 
-  // manual trigger (for scheduler)
-  // call: GET /sendTomorrow?key=WEBHOOK_SECRET
   app.get("/sendTomorrow", async (req, res) => {
     if (req.query.key !== WEBHOOK_SECRET) return res.status(403).send("Forbidden");
     try {
@@ -474,7 +656,6 @@ async function main() {
     }
   });
 
-  // Telegraf webhook handler
   app.post(WEBHOOK_PATH, bot.webhookCallback(WEBHOOK_PATH));
 
   app.listen(PORT, async () => {
