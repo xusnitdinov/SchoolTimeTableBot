@@ -1,0 +1,5 @@
+# Normalize text files and let Git handle platform-specific EOL
+* text=auto
+
+# Ensure lockfiles use LF in the repo
+package-lock.json text eol=lf

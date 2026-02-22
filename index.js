@@ -13,7 +13,7 @@ if (!BOT_TOKEN) {
 }
 
 const TZ = process.env.TZ || "Asia/Tashkent";
-let SEND_TIME = process.env.SEND_TIME || "18:00";
+let SEND_TIME = process.env.SEND_TIME || "15:00"; // default changed to 15:00 (3 PM)
 const ADMIN_USERNAME = (process.env.ADMIN_USERNAME || "AzizbekEn").replace(/^@/, "");
 
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
@@ -51,6 +51,12 @@ function getTomorrowIndex(now = new Date()) {
 
 function getTodayIndex(now = new Date()) {
   return now.getDay();
+}
+
+function getYesterdayIndex(now = new Date()) {
+  const today = now.getDay();
+  if (today === 0) return 6; // Sunday -> Saturday
+  return today - 1;
 }
 
 // ===== KEYBOARDS =====
@@ -145,6 +151,35 @@ async function main() {
     );
   `);
 
+  // -- Migration: ensure legacy DB has expected columns
+  try {
+    const cols = await db.all("PRAGMA table_info('chats')");
+    const names = cols.map((r) => r.name);
+    const expectCols = [
+      { name: 'first_name', sql: "ALTER TABLE chats ADD COLUMN first_name TEXT" },
+      { name: 'username', sql: "ALTER TABLE chats ADD COLUMN username TEXT" },
+      { name: 'last_start_ts', sql: "ALTER TABLE chats ADD COLUMN last_start_ts INTEGER DEFAULT 0" },
+      { name: 'reminder_enabled', sql: "ALTER TABLE chats ADD COLUMN reminder_enabled INTEGER DEFAULT 1" },
+      { name: 'reminder_time', sql: "ALTER TABLE chats ADD COLUMN reminder_time TEXT DEFAULT '18:00'" },
+      { name: 'language', sql: "ALTER TABLE chats ADD COLUMN language TEXT DEFAULT 'uz'" },
+      { name: 'last_interaction_ts', sql: "ALTER TABLE chats ADD COLUMN last_interaction_ts INTEGER DEFAULT 0" },
+      { name: 'last_message_id', sql: "ALTER TABLE chats ADD COLUMN last_message_id INTEGER DEFAULT NULL" },
+    ];
+
+    for (const c of expectCols) {
+      if (!names.includes(c.name)) {
+        try {
+          await db.run(c.sql);
+          console.log(`🔧 Migration: added column ${c.name} to chats`);
+        } catch (e) {
+          console.warn(`Migration: could not add column ${c.name}:`, e?.message || e);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('Migration check failed:', e?.message || e);
+  }
+
   await db.exec(`
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -218,7 +253,7 @@ async function main() {
   }
 
   async function listChats() {
-    return db.all(`SELECT chat_id FROM chats`);
+    return db.all(`SELECT chat_id, first_name, username, last_interaction_ts FROM chats`);
   }
 
   async function isBanned(chatId) {
@@ -288,20 +323,23 @@ async function main() {
     return { totalUsers: totalUsers?.count || 0, totalInteractions: totalInteractions?.count || 0, activeToday: activeToday?.count || 0 };
   }
 
-  // Load SEND_TIME from settings
-  const savedSend = await getSetting("SEND_TIME");
-  if (savedSend) {
-    SEND_TIME = savedSend;
-  }
+  // Load SEND_TIME from settings (force to 15:00 as requested)
+  // We persist the value so scheduled job uses 15:00 immediately.
+  SEND_TIME = "15:00";
+  try {
+    await setSetting("SEND_TIME", SEND_TIME);
+  } catch (_) {}
 
-  // get bot username for deep links
+  // get bot info for deep links and id
   let BOT_USERNAME = null;
+  let BOT_ID = null;
   try {
     const me = await bot.telegram.getMe();
     BOT_USERNAME = me.username;
-    console.log("Bot username:", BOT_USERNAME);
+    BOT_ID = me.id;
+    console.log("Bot username:", BOT_USERNAME, "id:", BOT_ID);
   } catch (e) {
-    console.warn("Could not get bot username:", e?.message || e);
+    console.warn("Could not get bot username/id:", e?.message || e);
   }
 
   // ---- SEND FUNCTIONS ----
@@ -409,16 +447,51 @@ async function main() {
     await setLastInteraction(chatId);
     await logStat("start", chatId, "");
 
-    return ctx.reply(`✅ Bot tayyor.\n👋 Salom ${firstName || "do'st"}!\n\nQuyidagi tugmalarni bosing 👇`, {
-      reply_markup: { inline_keyboard: mainMenuKeyboard().inline_keyboard },
-    });
+      // Show simplified inline buttons on /start: Tomorrow, Today, Yesterday, Help
+      return ctx.reply(`✅ Bot tayyor.\n👋 Salom ${firstName || "do'st"}!\n\nQuyidagi tugmalarni bosing 👇`, {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "➡️ Ertaga", callback_data: "cmd_tomorrow" },
+              { text: "📌 Bugun", callback_data: "cmd_today" },
+            ],
+            [{ text: "◀️ Kecha", callback_data: "cmd_yesterday" }, { text: "ℹ️ Yordam", callback_data: "cmd_help" }],
+          ],
+        },
+      });
   });
 
   bot.command("admin", async (ctx) => {
     const from = ctx.from?.username || "";
     if (from !== ADMIN_USERNAME) return ctx.reply("Siz admin emassiz.");
 
-    return ctx.reply("⚙️ Admin panel:", { reply_markup: adminKeyboard() });
+  return ctx.reply("⚙️ Admin panel:", { reply_markup: { inline_keyboard: adminKeyboard().inline_keyboard } });
+  });
+
+  // Track when bot is added/removed from chats so we have an accurate chats list
+  bot.on("my_chat_member", async (ctx) => {
+    try {
+      const info = ctx.update.my_chat_member;
+      if (!info) return;
+      const chat = info.chat;
+      const newStatus = info.new_chat_member?.status;
+      // When bot becomes a member or admin, save the chat
+      if (newStatus === "member" || newStatus === "administrator") {
+        const title = chat.title || chat.first_name || "";
+        const username = chat.username || "";
+        await upsertChat(chat.id, title, username);
+        console.log(`Joined chat ${chat.id} (${title})`);
+      }
+      // When bot is removed, delete the chat
+      if (newStatus === "left" || newStatus === "kicked") {
+        try {
+          await removeChat(chat.id);
+          console.log(`Removed chat ${chat.id} from DB`);
+        } catch (_) {}
+      }
+    } catch (e) {
+      console.warn('my_chat_member handler error:', e?.message || e);
+    }
   });
 
   // ===== BUTTON HANDLER =====
@@ -429,8 +502,11 @@ async function main() {
     const firstName = ctx.from?.first_name || "do'st";
 
     try {
+      console.log(`callback_query: data=${data} from=${from} chat=${chatId}`);
       await ctx.answerCbQuery();
-    } catch (_) {}
+    } catch (err) {
+      console.warn('answerCbQuery failed:', err?.message || err);
+    }
 
     await setLastInteraction(chatId);
 
@@ -439,7 +515,7 @@ async function main() {
       await upsertChat(chatId, firstName);
       const dayIndex = getTodayIndex(new Date());
       if (dayIndex === 0) {
-        return ctx.reply("😴 Yakshanba — dars yo'q.", { reply_markup: mainMenuKeyboard() });
+        return ctx.reply("😴 Yakshanba — dars yo'q.", { reply_markup: { inline_keyboard: mainMenuKeyboard().inline_keyboard } });
       }
       await ctx.reply(`Salom ${firstName}! 📌 Bugungi darslar:`);
       await sendSchedule(chatId, dayIndex);
@@ -454,6 +530,17 @@ async function main() {
       return;
     }
 
+    if (data === "cmd_yesterday") {
+      await upsertChat(chatId, firstName);
+      const dayIndex = getYesterdayIndex(new Date());
+      if (dayIndex === 0) {
+        return ctx.reply("😴 Yakshanba — dars yo'q.", { reply_markup: { inline_keyboard: mainMenuKeyboard().inline_keyboard } });
+      }
+      await ctx.reply(`Salom ${firstName}! ◀️ Kechagi darslar:`);
+      await sendSchedule(chatId, dayIndex);
+      return;
+    }
+
     if (data === "cmd_full") {
       await upsertChat(chatId, firstName);
       await ctx.reply(`Salom ${firstName}! 📅 To'liq jadval:`);
@@ -462,7 +549,7 @@ async function main() {
     }
 
     if (data === "cmd_settings") {
-      await ctx.reply("⚙️ Sozlamalar:", { reply_markup: settingsKeyboard() });
+      await ctx.reply("⚙️ Sozlamalar:", { reply_markup: { inline_keyboard: settingsKeyboard().inline_keyboard } });
       return;
     }
 
@@ -473,7 +560,7 @@ async function main() {
           `👥 Foydalanuvchilar: ${stats.totalUsers}\n` +
           `💬 Jami o'zaro muloqot: ${stats.totalInteractions}\n` +
           `🔥 Bugun faol: ${stats.activeToday}`,
-        { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() }
+        { parse_mode: "Markdown", reply_markup: { inline_keyboard: mainMenuKeyboard().inline_keyboard } }
       );
       return;
     }
@@ -495,13 +582,13 @@ async function main() {
           `• "Statistika" — bot statistikasi\n` +
           `• "Stop" — obunani bekor qilish\n\n` +
           `Admin: /admin`,
-        { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() }
+        { parse_mode: "Markdown", reply_markup: { inline_keyboard: mainMenuKeyboard().inline_keyboard } }
       );
       return;
     }
 
     if (data === "cmd_back") {
-      await ctx.reply("🔙 Asosiy menyu:", { reply_markup: mainMenuKeyboard() });
+      await ctx.reply("🔙 Asosiy menyu:", { reply_markup: { inline_keyboard: mainMenuKeyboard().inline_keyboard } });
       return;
     }
 
@@ -511,13 +598,13 @@ async function main() {
       const newVal = chat?.reminder_enabled ? 0 : 1;
       await db.run(`UPDATE chats SET reminder_enabled = ? WHERE chat_id = ?`, newVal, chatId);
       const status = newVal ? "✅ Yoqilgan" : "🔇 O'chirilgan";
-      await ctx.reply(`🔔 Reminder: ${status}`, { reply_markup: settingsKeyboard() });
+      await ctx.reply(`🔔 Reminder: ${status}`, { reply_markup: { inline_keyboard: settingsKeyboard().inline_keyboard } });
       return;
     }
 
     if (data === "settings_lang_uz") {
       await db.run(`UPDATE chats SET language = ? WHERE chat_id = ?`, "uz", chatId);
-      await ctx.reply(`🌍 Til: O'zbek tanlandi`, { reply_markup: settingsKeyboard() });
+      await ctx.reply(`🌍 Til: O'zbek tanlandi`, { reply_markup: { inline_keyboard: settingsKeyboard().inline_keyboard } });
       return;
     }
 
@@ -536,7 +623,7 @@ async function main() {
       }
 
       if (data === "admin_back") {
-        return ctx.reply("⚙️ Admin panel:", { reply_markup: adminKeyboard() });
+  return ctx.reply("⚙️ Admin panel:", { reply_markup: { inline_keyboard: adminKeyboard().inline_keyboard } });
       }
 
       if (data === "admin_dashboard") {
@@ -549,35 +636,54 @@ async function main() {
             `🔥 Bugun faol: ${stats.activeToday}\n` +
             `🕒 Jo'natish vaqti: ${SEND_TIME}\n\n` +
             `Boshqa amallarga admin panelini ishlating.`,
-          { parse_mode: "Markdown", reply_markup: adminKeyboard() }
+          { parse_mode: "Markdown", reply_markup: { inline_keyboard: adminKeyboard().inline_keyboard } }
         );
         return;
       }
 
       if (data === "admin_list") {
-        const chats = await listChats();
+        try {
+          const chats = await db.all(`SELECT chat_id, first_name, username, last_interaction_ts FROM chats ORDER BY last_interaction_ts DESC`);
         const pageSize = 10;
         const page = 0;
         const start = page * pageSize;
         const pageItems = chats.slice(start, start + pageSize);
         if (pageItems.length === 0) return ctx.reply("Hech qanday chat topilmadi.");
 
-        const lines = pageItems.map((c, i) => `${start + i + 1}. ${c.chat_id}`).join("\n");
+        const lines = pageItems
+          .map((c, i) => {
+            const name = c.first_name || c.username || String(c.chat_id);
+            return `${start + i + 1}. ${name} (${c.chat_id})`;
+          })
+          .join("\n");
         const rows = pageItems.map((c) => [{ text: `❌ ${c.chat_id}`, callback_data: `admin_remove_${c.chat_id}` }]);
         rows.push([{ text: "🔙 Orqaga", callback_data: "admin_back" }]);
         await ctx.answerCbQuery();
-        await ctx.editMessageText(`🔎 Chatlar: ${chats.length} ta\n\n${lines}`, {
+        // Use reply instead of editMessageText to avoid edit permission issues
+        await ctx.reply(`🔎 Chatlar: ${chats.length} ta\n\n${lines}`, {
           reply_markup: { inline_keyboard: rows },
         });
         return;
+        } catch (e) {
+          console.error('admin_list handler error:', e?.message || e);
+          await ctx.reply('❌ Xato: chatlar olinmadi. Logni tekshiring.');
+          return;
+        }
       }
 
       if (data === "admin_broadcast") {
-        await setPending(from, "broadcast_wait");
-        return ctx.reply(
-          "📣 Iltimos, yuboriladigan xabar matnini shu chatga yuboring.\n\n/cancel bilan bekor qiling.",
-          { reply_markup: { inline_keyboard: [] } }
-        );
+        try {
+          await setPending(from, "broadcast_wait");
+          await ctx.answerCbQuery();
+          return ctx.reply(
+            "📣 Iltimos, yuboriladigan xabar matnini shu chatga yuboring.\n\n/cancel bilan bekor qiling.",
+            { reply_markup: { inline_keyboard: [] } }
+          );
+        } catch (e) {
+          console.error('admin_broadcast error:', e?.message || e);
+          await ctx.reply('❌ Xato: Broadcastga tayyorlash muvaffaqiyatsiz.');
+          return;
+        }
       }
 
       if (data === "admin_set_time") {
@@ -596,7 +702,7 @@ async function main() {
             `💬 Jami muloqot: ${stats.totalInteractions}\n` +
             `🔥 Bugun faol: ${stats.activeToday}\n` +
             `🕐 Hozirgi jo'natish vaqti: ${SEND_TIME}`,
-          { parse_mode: "Markdown", reply_markup: adminKeyboard() }
+          { parse_mode: "Markdown", reply_markup: { inline_keyboard: adminKeyboard().inline_keyboard } }
         );
         return;
       }
@@ -632,6 +738,17 @@ async function main() {
     const text = ctx.message?.text || "";
     const chatId = ctx.chat.id;
 
+    // Auto-register group chats on any activity so admin list stays accurate
+    try {
+      if (ctx.chat && ctx.chat.type && ctx.chat.type !== "private") {
+        const title = ctx.chat.title || ctx.chat.first_name || "";
+        const uname = ctx.chat.username || "";
+        await upsertChat(ctx.chat.id, title, uname);
+      }
+    } catch (e) {
+      console.warn('auto-register chat failed:', e?.message || e);
+    }
+
     await setLastInteraction(chatId);
 
     if (text === "/cancel") {
@@ -648,7 +765,7 @@ async function main() {
           const time = `${m[1].padStart(2, "0")}:${m[2]}`;
           await db.run(`UPDATE chats SET reminder_time = ? WHERE chat_id = ?`, time, chatId);
           await clearPending(String(chatId));
-          return ctx.reply(`✅ Reminder vaqti o'rnatildi: ${time}`, { reply_markup: settingsKeyboard() });
+          return ctx.reply(`✅ Reminder vaqti o'rnatildi: ${time}`, { reply_markup: { inline_keyboard: settingsKeyboard().inline_keyboard } });
         }
       }
     }
@@ -658,19 +775,75 @@ async function main() {
 
     if (pending.action === "broadcast_wait") {
       const chats = await listChats();
-      let sent = 0;
+      const successes = [];
+      const failures = [];
       for (const row of chats) {
+        const id = Number(row.chat_id);
+        // Only send to group chats (negative IDs)
+        if (id >= 0) continue;
+
+        if (await isBanned(id)) {
+          console.log(`broadcast: skipping banned chat ${id}`);
+          failures.push({ id, reason: "banned" });
+          continue;
+        }
+
+        // Check bot membership first to avoid unnecessary sends
         try {
-          if (await isBanned(row.chat_id)) continue;
-          await bot.telegram.sendMessage(row.chat_id, `📣 *Admin Broadcast*\n\n${text}`, {
-            parse_mode: "Markdown",
-            reply_markup: { inline_keyboard: [] },
-          });
-          sent++;
-        } catch (_) {}
+          if (BOT_ID) {
+            const member = await bot.telegram.getChatMember(id, BOT_ID);
+            const status = member?.status;
+            if (status === "left" || status === "kicked") {
+              console.log(`broadcast: bot not a member of ${id} (status=${status}), removing from DB`);
+              try {
+                await removeChat(id);
+              } catch (_) {}
+              failures.push({ id, reason: `not_member (${status})` });
+              continue;
+            }
+          }
+        } catch (e) {
+          // getChatMember can fail for private channels or other reasons; log and continue to attempt send
+          console.warn(`broadcast: getChatMember check for ${id} failed:`, e?.message || e);
+        }
+
+        // Try sending with retries for transient errors
+        let sentOk = false;
+        let lastErr = null;
+        for (let attempt = 1; attempt <= 3 && !sentOk; attempt++) {
+          try {
+            console.log(`broadcast: sending to ${id} (attempt ${attempt})`);
+            await bot.telegram.sendMessage(id, `📣 Admin xabari\n\n${text}`);
+            successes.push(id);
+            sentOk = true;
+          } catch (err) {
+            lastErr = err;
+            console.warn(`broadcast to ${id} attempt ${attempt} failed:`, err?.message || err);
+            // If it's a permanent failure, break early (e.g., 403, 400 chat not found)
+            const code = err?.response?.statusCode || err?.code || "";
+            const msg = err?.message || "";
+            if (msg.includes("not member") || msg.includes("bot was kicked") || msg.includes("chat not found") || msg.includes("Forbidden") || msg.includes("Bad Request")) {
+              break;
+            }
+            // short backoff
+            await new Promise((res) => setTimeout(res, 500 * attempt));
+          }
+        }
+        if (!sentOk) {
+          failures.push({ id, reason: lastErr?.message || String(lastErr) });
+        }
       }
       await clearPending(from);
-      return ctx.reply(`✅ Broadcast yuborildi: ${sent} ta chatga.`);
+      // Prepare a friendly summary (truncate long failure lists)
+      const ok = successes.length;
+      const fail = failures.length;
+      let reply = `✅ Broadcast yuborildi: ${ok} ta guruhga.`;
+      if (fail > 0) {
+        reply += `\n⚠️ ${fail} ta guruhga yuborilmadi.`;
+        const list = failures.slice(0, 10).map((f) => `• ${f.id}: ${f.reason}`).join("\n");
+        reply += `\n\nXatolar (max 10):\n${list}`;
+      }
+      return ctx.reply(reply);
     }
 
     if (pending.action === "set_time_wait") {
@@ -716,9 +889,14 @@ async function main() {
 
   app.listen(PORT, async () => {
     console.log(`🌐 Server listening on port ${PORT}`);
-
     if (!BASE_URL) {
-      console.log("⚠️ BASE_URL missing. Set BASE_URL in Choreo env vars then redeploy.");
+      console.log("ℹ️ BASE_URL missing — starting bot in polling mode for local testing.");
+      try {
+        await bot.launch();
+        console.log("✅ Bot launched (polling)");
+      } catch (e) {
+        console.error("❌ Failed to launch bot in polling mode:", e?.message || e);
+      }
       return;
     }
 
