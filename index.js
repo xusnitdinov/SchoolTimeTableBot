@@ -163,6 +163,14 @@ async function main() {
   `);
 
   await db.exec(`
+    CREATE TABLE IF NOT EXISTS banned_chats (
+      chat_id INTEGER PRIMARY KEY,
+      reason TEXT DEFAULT '',
+      banned_at INTEGER DEFAULT (strftime('%s','now'))
+    );
+  `);
+
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS stats (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       event_type TEXT,
@@ -211,6 +219,25 @@ async function main() {
 
   async function listChats() {
     return db.all(`SELECT chat_id FROM chats`);
+  }
+
+  async function isBanned(chatId) {
+    const row = await db.get(`SELECT chat_id FROM banned_chats WHERE chat_id = ?`, chatId);
+    return !!row;
+  }
+
+  async function banChat(chatId, reason = "") {
+    await db.run(`INSERT OR REPLACE INTO banned_chats(chat_id, reason) VALUES(?,?)`, chatId, reason);
+    // also remove from chats list
+    await removeChat(chatId);
+  }
+
+  async function unbanChat(chatId) {
+    await db.run(`DELETE FROM banned_chats WHERE chat_id = ?`, chatId);
+  }
+
+  async function listBanned() {
+    return db.all(`SELECT chat_id,reason,banned_at FROM banned_chats ORDER BY banned_at DESC`);
   }
 
   async function getSetting(key) {
@@ -267,12 +294,24 @@ async function main() {
     SEND_TIME = savedSend;
   }
 
+  // get bot username for deep links
+  let BOT_USERNAME = null;
+  try {
+    const me = await bot.telegram.getMe();
+    BOT_USERNAME = me.username;
+    console.log("Bot username:", BOT_USERNAME);
+  } catch (e) {
+    console.warn("Could not get bot username:", e?.message || e);
+  }
+
   // ---- SEND FUNCTIONS ----
   async function sendSchedule(chatId, dayIndex) {
     if (dayIndex === 0) return;
 
     const subjects = TIMETABLE[dayIndex];
     if (!subjects) return;
+    // don't send to banned chats
+    if (await isBanned(chatId)) return;
 
     const lastId = await getLastMessage(chatId);
     if (lastId) {
@@ -285,7 +324,7 @@ async function main() {
 
     const sent = await bot.telegram.sendMessage(chatId, text, {
       parse_mode: "Markdown",
-      reply_markup: mainMenuKeyboard(),
+      reply_markup: { inline_keyboard: mainMenuKeyboard().inline_keyboard },
     });
 
     await setLastMessage(chatId, sent.message_id);
@@ -300,9 +339,10 @@ async function main() {
       lines.push("");
     }
     const text = `📚 *To'liq dars jadvali*\n\n${lines.join("\n")}`;
+    if (await isBanned(chatId)) return;
     await bot.telegram.sendMessage(chatId, text, {
       parse_mode: "Markdown",
-      reply_markup: mainMenuKeyboard(),
+      reply_markup: { inline_keyboard: mainMenuKeyboard().inline_keyboard },
     });
     await logStat("interaction", chatId, "view_full_timetable");
   }
@@ -350,13 +390,27 @@ async function main() {
       return ctx.reply("Biroz kuting 🙂");
     }
 
-    await upsertChat(chatId, firstName, username);
+    // If in a group and user is not admin, do not allow subscribe here.
+    if (ctx.chat.type && ctx.chat.type !== "private") {
+      if (username !== ADMIN_USERNAME) {
+        // send a private chat deep-link button so users go DM the bot instead
+        const botLink = BOT_USERNAME ? `https://t.me/${BOT_USERNAME}` : null;
+        const buttons = botLink
+          ? { reply_markup: { inline_keyboard: [[{ text: "📩 Shaxsiy suhbatga o'tish", url: botLink }]] } }
+          : { reply_markup: { inline_keyboard: [[{ text: "📩 Yozish (ochilmaydi)", callback_data: "noop" }]] } };
+        return ctx.reply("Iltimos, bot bilan shaxsiy suhbatda muloqot qiling. Tugmani bosing:", buttons);
+      }
+      // admin in group: allow admin panel
+      await upsertChat(chatId, firstName, username);
+    } else {
+      await upsertChat(chatId, firstName, username);
+    }
     await setLastStartTs(chatId, now);
     await setLastInteraction(chatId);
     await logStat("start", chatId, "");
 
     return ctx.reply(`✅ Bot tayyor.\n👋 Salom ${firstName || "do'st"}!\n\nQuyidagi tugmalarni bosing 👇`, {
-      reply_markup: mainMenuKeyboard(),
+      reply_markup: { inline_keyboard: mainMenuKeyboard().inline_keyboard },
     });
   });
 
@@ -521,14 +575,15 @@ async function main() {
       if (data === "admin_broadcast") {
         await setPending(from, "broadcast_wait");
         return ctx.reply(
-          "📣 Iltimos, yuboriladigan xabar matnini shu chatga yuboring.\n\n/cancel bilan bekor qiling."
+          "📣 Iltimos, yuboriladigan xabar matnini shu chatga yuboring.\n\n/cancel bilan bekor qiling.",
+          { reply_markup: { inline_keyboard: [] } }
         );
       }
 
       if (data === "admin_set_time") {
         await setPending(from, "set_time_wait");
         return ctx.reply("🕒 Vaqtni tanlang yoki HH:MM formatida yuboring:", {
-          reply_markup: adminTimeKeyboard(),
+          reply_markup: { inline_keyboard: adminTimeKeyboard().inline_keyboard },
         });
       }
 
@@ -606,6 +661,7 @@ async function main() {
       let sent = 0;
       for (const row of chats) {
         try {
+          if (await isBanned(row.chat_id)) continue;
           await bot.telegram.sendMessage(row.chat_id, `📣 *Admin Broadcast*\n\n${text}`, {
             parse_mode: "Markdown",
             reply_markup: { inline_keyboard: [] },
