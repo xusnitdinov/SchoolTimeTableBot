@@ -258,6 +258,8 @@ async function main() {
       await upsertChat(chatId);
       const dayIndex = getTodayIndex(new Date());
       if (dayIndex === 0) return ctx.reply("😴 Yakshanba — dars yo'q.", { reply_markup: mainMenuKeyboard() });
+      const name = ctx.from?.first_name || ctx.from?.username || "do'st";
+      await ctx.reply(`Salom ${name}!\n😴 Yakshanba — dars yo'q.`);
       await sendSchedule(chatId, dayIndex);
       return;
     }
@@ -265,12 +267,16 @@ async function main() {
     if (data === "cmd_tomorrow") {
       await upsertChat(chatId);
       const dayIndex = getTomorrowIndex(new Date());
+      const name = ctx.from?.first_name || ctx.from?.username || "do'st";
+      await ctx.reply(`Salom ${name}! Bu ertangi darslar:`);
       await sendSchedule(chatId, dayIndex);
       return;
     }
 
     if (data === "cmd_full") {
       await upsertChat(chatId);
+      const name = ctx.from?.first_name || ctx.from?.username || "do'st";
+      await ctx.reply(`Salom ${name}! To'liq jadval:`);
       await sendFullTimetable(chatId);
       return;
     }
