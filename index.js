@@ -7,6 +7,48 @@ import { open } from "sqlite";
 
 // ===== ENV =====
 const BOT_TOKEN = process.env.BOT_TOKEN;
+
+  // ===== MESSAGE HANDLER (for admin pending actions) =====
+  bot.on("message", async (ctx) => {
+    const from = ctx.from?.username || "";
+    const text = ctx.message?.text || "";
+    if (!from) return;
+
+    // cancel command
+    if (text === "/cancel") {
+      await clearPending(from);
+      return ctx.reply("✅ Bekor qilindi.");
+    }
+
+    const pending = await getPending(from);
+    if (!pending) return; // nothing to handle
+
+    if (pending.action === "broadcast_wait") {
+      // send the provided text to all chats
+      const chats = await listChats();
+      let sent = 0;
+      for (const row of chats) {
+        try {
+          await bot.telegram.sendMessage(row.chat_id, `📣 *Broadcast from admin:*\n\n${text}`, { parse_mode: "Markdown", reply_markup: { inline_keyboard: [] } });
+          sent++;
+        } catch (_) {}
+      }
+      await clearPending(from);
+      return ctx.reply(`✅ Broadcast yuborildi: ${sent} ta chatga.`);
+    }
+
+    if (pending.action === "set_time_wait") {
+      // validate HH:MM
+      const m = text.match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+      if (!m) return ctx.reply("❌ Noto'g'ri format. Iltimos HH:MM formatida yuboring (masalan 08:30) yoki /cancel bilan chiqish.");
+      const time = `${m[1].padStart(2, "0")}:${m[2]}`;
+      SEND_TIME = time;
+      scheduleDaily();
+      await setSetting("SEND_TIME", SEND_TIME);
+      await clearPending(from);
+      return ctx.reply(`✅ Jo'natish vaqti yangilandi: ${SEND_TIME}`);
+    }
+  });
 if (!BOT_TOKEN) {
   console.error("Missing BOT_TOKEN");
   process.exit(1);
@@ -110,6 +152,52 @@ async function main() {
       last_start_ts INTEGER DEFAULT 0
     );
   `);
+
+  // settings table for persistent values (like SEND_TIME)
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
+  `);
+
+  // pending admin actions (one per admin username)
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS pending_actions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      admin_username TEXT,
+      action TEXT,
+      payload TEXT,
+      created_at INTEGER DEFAULT (strftime('%s','now'))
+    );
+  `);
+
+  // Helper to get/set settings
+  async function getSetting(key) {
+    const row = await db.get(`SELECT value FROM settings WHERE key = ?`, key);
+    return row?.value ?? null;
+  }
+  async function setSetting(key, value) {
+    await db.run(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, String(value));
+  }
+
+  // Helper for pending actions
+  async function setPending(adminUsername, action, payload = null) {
+    await db.run(`DELETE FROM pending_actions WHERE admin_username = ?`, adminUsername);
+    await db.run(`INSERT INTO pending_actions(admin_username, action, payload) VALUES(?,?,?)`, adminUsername, action, payload);
+  }
+  async function getPending(adminUsername) {
+    return db.get(`SELECT * FROM pending_actions WHERE admin_username = ? ORDER BY created_at DESC LIMIT 1`, adminUsername);
+  }
+  async function clearPending(adminUsername) {
+    await db.run(`DELETE FROM pending_actions WHERE admin_username = ?`, adminUsername);
+  }
+
+  // load SEND_TIME from settings if present (persisted by admin)
+  const savedSend = await getSetting("SEND_TIME");
+  if (savedSend) {
+    SEND_TIME = savedSend;
+  }
 
   async function upsertChat(chatId) {
     await db.run(
@@ -311,33 +399,48 @@ async function main() {
       }
 
       if (data === "admin_list") {
+        // show paginated list (10 per page) with remove buttons
         const chats = await listChats();
-        const ids = chats.map((c) => c.chat_id).slice(0, 50);
-        return ctx.reply(`📋 Chatlar: ${chats.length}\nIDs(1-50): ${ids.join(", ")}`);
+        const pageSize = 10;
+        const page = 0;
+        const start = page * pageSize;
+        const pageItems = chats.slice(start, start + pageSize);
+        if (pageItems.length === 0) return ctx.reply("Hech qanday chat topilmadi.");
+
+        const lines = pageItems.map((c, i) => `${start + i + 1}. ${c.chat_id}`).join("\n");
+        const rows = pageItems.map((c) => [{ text: `❌ ${c.chat_id}`, callback_data: `admin_remove_${c.chat_id}` }]);
+        rows.push([{ text: "🔙 Orqaga", callback_data: "admin_back" }]);
+        await ctx.answerCbQuery();
+        return ctx.editMessageText(`🔎 Chatlar: ${chats.length} ta\n\n${lines}`, { reply_markup: { inline_keyboard: rows } });
       }
 
       if (data === "admin_broadcast") {
-        const dayIndex = getTomorrowIndex(new Date());
-        const chats = await listChats();
-        let sent = 0;
-        for (const row of chats) {
-          try {
-            await sendSchedule(row.chat_id, dayIndex);
-            sent++;
-          } catch (_) {}
-        }
-        return ctx.reply(`✅ Broadcast tugadi. Yuborildi: ${sent} chatga.`);
+        // ask admin to send the message text in this chat
+        await setPending(from, "broadcast_wait");
+        return ctx.reply("📣 Iltimos, yuboriladigan xabar matnini shu chatga yuboring. /cancel bilan bekor qiling.");
       }
 
       if (data === "admin_set_time") {
-        return ctx.reply("🕒 Vaqtni tanlang:", { reply_markup: adminTimeKeyboard() });
+        await setPending(from, "set_time_wait");
+        return ctx.reply("🕒 Iltimos, jo'natish vaqtini HH:MM formatida yuboring (masalan 08:30), yoki pastdagi tez tanlovlardan birini bosing:", { reply_markup: adminTimeKeyboard() });
       }
 
       if (data.startsWith("admin_time_")) {
         const time = data.replace("admin_time_", "");
         SEND_TIME = time;
         scheduleDaily();
+        await setSetting("SEND_TIME", SEND_TIME);
         return ctx.reply(`✅ Jo'natish vaqti yangilandi: ${SEND_TIME}`);
+      }
+
+      if (data && data.startsWith("admin_remove_")) {
+        const id = data.replace("admin_remove_", "");
+        try {
+          await removeChat(Number(id));
+          return ctx.reply(`✅ Chat ${id} o'chirildi.`);
+        } catch (e) {
+          return ctx.reply(`❌ Xato: ${e?.message || e}`);
+        }
       }
     }
   });
