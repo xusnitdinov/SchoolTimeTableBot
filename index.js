@@ -18,7 +18,8 @@ const ADMIN_USERNAME = (process.env.ADMIN_USERNAME || "AzizbekEn").replace(/^@/,
 
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "change-me";
 const WEBHOOK_PATH = `/telegraf/${WEBHOOK_SECRET}`;
-const PORT = process.env.PORT || 3000;
+// Use PORT from environment (Choreo) or default to 8000 per deployment requirement
+const PORT = process.env.PORT || 8000;
 const BASE_URL = process.env.BASE_URL || "";
 
 // ===== BOT =====
