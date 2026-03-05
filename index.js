@@ -35,6 +35,16 @@ const TIMETABLE = {
   6: ["Kimyo", "Biologiya", "Algebra", "San'art", "Geometriya", "Ona tili"],
 };
 
+// ===== NAVBATCHILAR (group leaders) =====
+const NAVBATCHILAR = {
+  1: ["Marvarid","Xurshida","Jahongir","odil"],
+  2: ["Ra'no","Dilnura","Jafar","Bexruz"],
+  3: ["Divor","X. Aziz","Marjona","Osiyo"],
+  4: ["Sarvinoz","Charos","Sh.Aziz","Asad"],
+  5: ["Alijon","Xusan","Muhammad"],
+  6: ["A.Feruza","S.Feruza","Jasur","Botir"],
+};
+
 const DAY_NAMES = ["Yakshanba", "Dushanba", "Seshanba", "Chorshanba", "Payshanba", "Juma", "Shanba"];
 
 function formatSubjects(dayIndex, subjects) {
@@ -64,6 +74,7 @@ function getYesterdayIndex(now = new Date()) {
 function mainMenuKeyboard() {
   return {
     inline_keyboard: [
+      [{ text: "👥 Navbatchilar", callback_data: "cmd_navbatchilar" }],
       [
         { text: "📌 Bugun", callback_data: "cmd_today" },
         { text: "➡️ Ertaga", callback_data: "cmd_tomorrow" },
@@ -546,6 +557,64 @@ async function main() {
       await upsertChat(chatId, firstName);
       await ctx.reply(`Salom ${firstName}! 📅 To'liq jadval:`);
       await sendFullTimetable(chatId);
+      return;
+    }
+
+    // ===== NAVBATCHILAR =====
+    if (data === "cmd_navbatchilar") {
+      await ctx.reply("👥 Navbatchilar — tanlang:", {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "📌 Bugun", callback_data: "nav_today" },
+              { text: "◀️ Kecha", callback_data: "nav_yesterday" },
+            ],
+            [
+              { text: "➡️ Ertaga", callback_data: "nav_tomorrow" },
+              { text: "📃 To'liq ro'yxat", callback_data: "nav_full" },
+            ],
+            [{ text: "🔙 Orqaga", callback_data: "cmd_back" }],
+          ],
+        },
+      });
+      return;
+    }
+
+    function formatNavList(dayIndex) {
+      if (!dayIndex || dayIndex === 0) return "😴 Yakshanba — navbatchilar ro'yxati yo'q.";
+      const names = NAVBATCHILAR[dayIndex] || [];
+      const title = DAY_NAMES[dayIndex] || "Kun";
+      const lines = names.map((n, i) => `${i + 1}. ${n}`).join("\n");
+      return `👥 *${title}* navbatchilar:\n${lines}`;
+    }
+
+    if (data === "nav_today") {
+      const dayIndex = getTodayIndex(new Date());
+      await ctx.reply(formatNavList(dayIndex), { parse_mode: "Markdown" });
+      return;
+    }
+
+    if (data === "nav_tomorrow") {
+      const dayIndex = getTomorrowIndex(new Date());
+      await ctx.reply(formatNavList(dayIndex), { parse_mode: "Markdown" });
+      return;
+    }
+
+    if (data === "nav_yesterday") {
+      const dayIndex = getYesterdayIndex(new Date());
+      await ctx.reply(formatNavList(dayIndex), { parse_mode: "Markdown" });
+      return;
+    }
+
+    if (data === "nav_full") {
+      const parts = [];
+      for (let d = 1; d <= 6; d++) {
+        parts.push(`*${DAY_NAMES[d]}*`);
+        const arr = NAVBATCHILAR[d] || [];
+        arr.forEach((n, i) => parts.push(`${i + 1}. ${n}`));
+        parts.push("");
+      }
+      await ctx.reply(`👥 *To'liq navbatchilar ro'yxati*\n\n${parts.join("\n")}`, { parse_mode: "Markdown" });
       return;
     }
 
