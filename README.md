@@ -1,38 +1,42 @@
-# SchoolTimeTableBot
+# School TimeTable Bot
 
-Telegram bot for a school class timetable (Uzbek UI). Students can check today's / tomorrow's lessons, see duty students (*navbatchilar*), and get daily reminder messages.
+Telegram bot that sends a class their daily timetable and *navbatchilar* (duty students) - in Uzbek.
 
-Built with **Telegraf**, **SQLite**, and **node-cron**. Designed for private chats with optional webhook hosting (e.g. Choreo / Express).
+Built for one school class: open the bot in a private chat, tap **Bugun / Ertaga**, get today’s or tomorrow’s lessons, and optionally get a daily reminder at a set time (default `Asia/Tashkent`).
+
+## Why it exists
+
+Paper schedules get lost. Group chats get noisy. This bot keeps the week’s lessons and duty list one tap away, with optional auto-reminders so people don’t forget navbatchilik.
 
 ## Features
 
-- Inline menu: today, tomorrow, yesterday, full week
-- Navbatchilar (group duty leaders) by weekday
-- Daily scheduled reminders (default timezone `Asia/Tashkent`)
-- Per-chat reminder on/off and reminder time settings
-- Admin panel (`/admin`): broadcast, chat list, stats, send-time control
-- SQLite persistence (`bot.db`) for chats, bans, settings, stats
-- Express webhook server when `BASE_URL` is set (polling otherwise)
+- Today / tomorrow / yesterday lesson lists
+- Full weekly timetable
+- Navbatchilar by weekday
+- Per-user reminder on/off + reminder time
+- Admin panel: broadcast, chat list, stats, global send time
+- SQLite storage for chats, bans, settings, and stats
+- Polling locally, or Express webhook when `BASE_URL` is set (easy to host on Choreo / similar)
 
 ## Stack
 
-| Piece | Package |
+| Piece | Tech |
 |---|---|
-| Bot | `telegraf` |
-| HTTP / webhook | `express` |
-| Schedule | `node-cron` |
-| DB | `sqlite` + `sqlite3` |
-| Config | `dotenv` |
+| Bot | Telegraf |
+| HTTP / webhook | Express |
+| Schedule | node-cron |
+| Database | SQLite (`sqlite` + `sqlite3`) |
+| Config | dotenv |
 
 ## Setup
 
-1. Clone and install:
-
 ```bash
+git clone https://github.com/xusnitdinov/SchoolTimeTableBot.git
+cd SchoolTimeTableBot
 npm install
 ```
 
-2. Create a `.env` file:
+Create `.env`:
 
 ```env
 BOT_TOKEN=your_telegram_bot_token
@@ -40,42 +44,41 @@ ADMIN_USERNAME=YourTelegramUsername
 TZ=Asia/Tashkent
 SEND_TIME=15:00
 PORT=8000
-# Optional webhook deploy:
+
+# Optional (webhook deploy):
 # BASE_URL=https://your-host.example
 # WEBHOOK_SECRET=change-me
 ```
 
-3. Edit the hard-coded timetable / navbatchilar in `index.js` if needed (`TIMETABLE`, `NAVBATCHILAR`).
-
-4. Run:
+Edit `TIMETABLE` and `NAVBATCHILAR` in `index.js` for your class, then:
 
 ```bash
 npm start
 ```
 
-## Main commands / buttons
+## How people use it
 
-| Action | What it does |
+| Action | Result |
 |---|---|
-| `/start` | Register chat + quick buttons |
-| Bugun / Ertaga / Kecha | Show that day's lessons |
-| To'liq jadval | Full weekly timetable |
-| Navbatchilar | Duty students for the day |
+| `/start` | Registers the chat and shows quick buttons |
+| Bugun / Ertaga / Kecha | That day's subjects |
+| To'liq jadval | Whole week |
+| Navbatchilar | Duty students |
 | Sozlamalar | Reminder toggle / time |
-| `/admin` | Admin tools (username must match `ADMIN_USERNAME`) |
-| Stop | Stop bot interaction / reminders for that chat |
+| Stop | Opt out of reminders / bot use |
+| `/admin` | Admin tools (must match `ADMIN_USERNAME`) |
 
-## Project layout
+## Layout
 
 ```
-index.js           Bot + Express + cron + SQLite logic
-package.json       Dependencies and start script
-bot.db             Created at runtime (not committed)
-.env               Secrets (not committed)
+index.js        Bot logic, cron jobs, SQLite, Express webhook
+package.json    Dependencies + npm start
+bot.db          Created at runtime (local data)
+.env            Secrets (do not commit)
 ```
 
-## Notes
+## Limits
 
-- Timetable content is currently hard-coded for one class schedule - change arrays in `index.js` for another class.
-- Prefer private chats; group use is limited by design.
-- Keep `BOT_TOKEN` and admin username private.
+- Timetable is hard-coded for one class - swap the arrays for another class.
+- Best in private chats; full group support is limited on purpose.
+- Never commit `BOT_TOKEN` or real student data.
